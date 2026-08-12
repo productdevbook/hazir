@@ -85,6 +85,11 @@ machine being unconfigured, or connect to something somebody was using.
 
 ```toml
 # .config/nextest.toml
+
+# Setup scripts are still experimental in nextest, and it refuses the file
+# without this line.
+experimental = ["setup-scripts"]
+
 [scripts.setup.hazir]
 command = 'hazir warm --sql migrations/ --pool 16'
 
@@ -93,8 +98,14 @@ filter = 'all()'
 setup = 'hazir'
 ```
 
-The setup script runs once for the whole run, and hands every test the
-snapshot it warmed.
+The setup script runs once for the whole run and hands every test the
+snapshot it warmed, through `NEXTEST_ENV`. This repository's own
+`.config/nextest.toml` does exactly that, against its own fixtures.
+
+This is the arrangement `hazır` exists for. nextest runs every test in a
+process of its own, which is what makes a leaked test cheap to contain — and
+also what makes an in-process pool worthless, because each process starts
+with an empty one. Putting the pool in the database is what survives it.
 
 ### Tests that change the schema
 
@@ -121,6 +132,32 @@ Optional. Leases are returned when they are dropped; this is for the ones that
 never were — a test that panicked, a run that was killed, a machine that went
 away. It is also run at the start of every `hazir warm`, so a suite that warms
 before each run needs nothing else.
+
+## What it costs
+
+Measured against a Postgres 18 in a container on one developer machine, with
+a fixture of two tables — `cargo test --test cost -- --ignored --nocapture`
+prints these for yours:
+
+| | |
+|---|---|
+| claiming a ready schema | 0.7 ms |
+| giving one back | 6.8 ms |
+| both, as a test sees it | 7.6 ms |
+| building one from the snapshot instead | 14 ms |
+| opening a connection | 85 ms |
+
+Two things worth reading out of that.
+
+The first is that even against two tables, leasing beats building. The
+schemas this was written for have sixty, and are reached through forty-odd
+migrations; there the comparison is milliseconds against seconds.
+
+The second is the last row. Opening a connection costs more than everything
+else together — it is almost all SCRAM's key derivation, which is slow on
+purpose. So this process opens exactly one, on a thread of its own, and every
+lease goes through it. A version that opened one per lease measured 96 ms and
+was slower than having no pool at all.
 
 ## What it does not do
 

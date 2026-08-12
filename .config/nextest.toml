@@ -1,0 +1,12 @@
+# hazir stocking its own pool before its own tests, which is also the shortest
+# demonstration of how to use it.
+
+# Still experimental in nextest, and it refuses the file without this line.
+experimental = ["setup-scripts"]
+
+[scripts.setup.hazir]
+command = 'cargo run --quiet --features cli --bin hazir -- warm --sql tests/migrations --pool 16'
+
+[[profile.default.scripts]]
+filter = 'all()'
+setup = 'hazir'
