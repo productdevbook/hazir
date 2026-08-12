@@ -54,9 +54,13 @@ LANGUAGE sql STABLE AS $$
         SELECT c.relname || ':' || a.attname || ':' || a.atttypid::text
                || ':' || a.attnotnull::text AS line
         FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
         JOIN pg_attribute a ON a.attrelid = c.oid
-        WHERE n.nspname = target
+        -- By the namespace's oid rather than by its name: the name would have
+        -- to be joined and then filtered, which reads every attribute in the
+        -- database. That is work proportional to how many schemas the pool
+        -- holds, on a call made once per test — the shape of the problem this
+        -- whole crate exists to get rid of.
+        WHERE c.relnamespace = to_regnamespace(target)::oid
           AND c.relkind IN ('r', 'p')
           AND a.attnum > 0
           AND NOT a.attisdropped

@@ -23,6 +23,9 @@ const BOOTSTRAP_LOCK: i64 = 6_174_310_982_745_113;
 pub struct Pool {
     url: String,
     client: Client,
+    /// Asked once. It cannot change while a run is going on, and asking per
+    /// lease is a round trip spent learning what is already known.
+    fingerprint: tokio::sync::OnceCell<String>,
 }
 
 impl Pool {
@@ -34,6 +37,7 @@ impl Pool {
         Ok(Pool {
             url: url.to_owned(),
             client,
+            fingerprint: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -67,28 +71,42 @@ impl Pool {
 
     /// Which snapshot a lease that names none is given.
     pub async fn current(&self) -> Result<String> {
-        if let Ok(named) = std::env::var("HAZIR_FINGERPRINT") {
-            if !named.is_empty() {
-                return Ok(named);
-            }
-        }
-        let row = self
-            .client
-            .query_opt("SELECT fingerprint FROM hazir.current", &[])
-            .await?;
-        row.map(|row| row.get(0)).ok_or(Error::NoSnapshot)
+        self.fingerprint
+            .get_or_try_init(|| async {
+                if let Ok(named) = std::env::var("HAZIR_FINGERPRINT") {
+                    if !named.is_empty() {
+                        return Ok(named);
+                    }
+                }
+                let row = self
+                    .client
+                    .query_opt("SELECT fingerprint FROM hazir.current", &[])
+                    .await?;
+                row.map(|row| row.get(0)).ok_or(Error::NoSnapshot)
+            })
+            .await
+            .cloned()
     }
 
-    /// A schema with the tables already in it.
+    /// The name of a schema with the tables already in it.
     ///
     /// One round trip in the ordinary case. `SKIP LOCKED` because two
     /// processes reaching for the last ready row is the normal case, not the
     /// rare one, and without it the second waits for the first's transaction
     /// rather than taking the next row along.
-    pub async fn lease(&self) -> Result<Lease> {
+    ///
+    /// `burn` asks for one of this test's own, dropped rather than recycled
+    /// when it comes back. For a test that changes the shape of what it is
+    /// given — the tests of a migration, above all. Recycling one of those
+    /// would hand the next test a schema that is no longer what the snapshot
+    /// says it is.
+    pub async fn claim(&self, burn: bool) -> Result<String> {
         let fingerprint = self.current().await?;
-        let holder = Holder::me().to_string();
+        if burn {
+            return self.build_one(&fingerprint, true, true).await;
+        }
 
+        let holder = Holder::me().to_string();
         let claimed = self
             .client
             .query_opt(
@@ -104,23 +122,22 @@ impl Pool {
             )
             .await?;
 
-        let schema: String = match claimed {
-            Some(row) => row.get(0),
-            None => self.build_one(&fingerprint, true, false).await?,
-        };
-
-        Ok(Lease::new(self.url.clone(), schema, false))
+        match claimed {
+            Some(row) => Ok(row.get(0)),
+            None => self.build_one(&fingerprint, true, false).await,
+        }
     }
 
-    /// A schema of its own, dropped rather than recycled when it comes back.
-    ///
-    /// For a test that changes the shape of what it is given — the tests of a
-    /// migration, above all. Recycling one of those would hand the next test
-    /// a schema that is no longer what the snapshot says it is.
+    pub async fn lease(&self) -> Result<Lease> {
+        Ok(Lease::new(
+            self.url.clone(),
+            self.claim(false).await?,
+            false,
+        ))
+    }
+
     pub async fn lease_fresh(&self) -> Result<Lease> {
-        let fingerprint = self.current().await?;
-        let schema = self.build_one(&fingerprint, true, true).await?;
-        Ok(Lease::new(self.url.clone(), schema, true))
+        Ok(Lease::new(self.url.clone(), self.claim(true).await?, true))
     }
 
     /// Brings the number of schemas for a snapshot up to `want`.

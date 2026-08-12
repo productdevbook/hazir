@@ -33,6 +33,7 @@
 //! hazir warm --pool 16 --migrate "cargo run --quiet -p migration"
 //! ```
 
+mod agent;
 mod error;
 mod holder;
 mod lease;
@@ -50,7 +51,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// A schema with the tables already in it, emptied and passed on afterwards.
 pub async fn lease() -> Result<Lease> {
-    Pool::from_env().await?.lease().await
+    let taken = agent::ask(false).await?;
+    Ok(Lease::new(taken.url, taken.schema, false))
 }
 
 /// A schema of this test's own, thrown away afterwards.
@@ -58,7 +60,8 @@ pub async fn lease() -> Result<Lease> {
 /// For a test that changes the shape of what it is given rather than only its
 /// rows — the tests of a migration, above all.
 pub async fn lease_fresh() -> Result<Lease> {
-    Pool::from_env().await?.lease_fresh().await
+    let taken = agent::ask(true).await?;
+    Ok(Lease::new(taken.url, taken.schema, true))
 }
 
 /// Where the pool is.

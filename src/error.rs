@@ -10,6 +10,8 @@ pub enum Error {
     UnknownSnapshot(String),
     /// The pool was empty and a schema could not be built to replace it.
     Exhausted,
+    /// The database this process leases from did not answer at all.
+    Unreachable(String),
     Postgres(tokio_postgres::Error),
     Io(std::io::Error),
     /// The command that builds the schema said no.
@@ -31,6 +33,7 @@ impl fmt::Display for Error {
             ),
             Error::UnknownSnapshot(fp) => write!(f, "no snapshot called {fp} in this database"),
             Error::Exhausted => write!(f, "the pool is empty and a schema could not be built"),
+            Error::Unreachable(why) => write!(f, "the pool's database did not answer: {why}"),
             Error::Postgres(err) => write!(f, "postgres: {err}"),
             Error::Io(err) => write!(f, "{err}"),
             Error::Migrate(what) => write!(f, "the schema could not be built: {what}"),
