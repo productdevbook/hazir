@@ -1,0 +1,27 @@
+[package]
+name = "hazir"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+description = "Postgres schemas for tests, leased from a warm pool instead of migrated one per test."
+repository = "https://github.com/productdevbook/hazir"
+readme = "README.md"
+keywords = ["postgres", "testing", "nextest", "fixtures", "database"]
+categories = ["development-tools::testing", "database"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time", "process", "sync"] }
+tokio-postgres = "0.7"
+sha2 = "0.10"
+clap = { version = "4", features = ["derive"], optional = true }
+
+[features]
+cli = ["dep:clap", "tokio/rt-multi-thread"]
+
+[[bin]]
+name = "hazir"
+required-features = ["cli"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
