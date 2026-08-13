@@ -7,7 +7,10 @@ use crate::snapshot::Apply;
 use crate::{Error, Lease, Result};
 
 /// The token a stored snapshot carries where the schema name goes.
-pub(crate) const PLACEHOLDER: &str = "@hazir_schema@";
+///
+/// Public because it is part of what is written into `hazir.snapshot`, and
+/// anything that reads or writes one of those rows has to name it.
+pub const PLACEHOLDER: &str = "@hazir_schema@";
 
 const BOOTSTRAP: &str = include_str!("sql/bootstrap.sql");
 

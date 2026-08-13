@@ -337,3 +337,94 @@ async fn a_lease_can_name_the_snapshot_it_wants() {
         .get(0);
     assert_eq!(from, mine, "the lease came out of the wrong pool");
 }
+
+/// A pg_dump carries `set_config('search_path', '')` of its own, and it is
+/// replayed on the connection that keeps the pool's books. That connection
+/// then could not see an unqualified table again, which surfaced a long way
+/// away as somebody else's table having gone missing.
+#[tokio::test]
+async fn replaying_a_snapshot_leaves_the_search_path_alone() {
+    let Some((pool, _)) = ready(1).await else {
+        return;
+    };
+
+    pool.client()
+        .batch_execute("CREATE TABLE IF NOT EXISTS hazir_canary (id int)")
+        .await
+        .expect("a table in the default schema");
+
+    let dir = std::env::temp_dir().join(format!("hazir-path-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("somewhere to put it");
+    std::fs::write(
+        dir.join("001.sql"),
+        "CREATE TABLE thing (id bigserial PRIMARY KEY);\n         SELECT pg_catalog.set_config('search_path', '', false);\n",
+    )
+    .expect("a migration that does what a dump does");
+
+    let recipe = Recipe::Sql(hazir::sql_files(&dir).expect("the file"));
+    let fingerprint = format!("{:0<64}", "searchpath");
+    hazir::capture(&pool, &fingerprint, &recipe)
+        .await
+        .expect("a snapshot");
+    let schema = pool
+        .build_one(&fingerprint, false, false)
+        .await
+        .expect("a schema from it");
+
+    // Unqualified on purpose: this is the thing that broke.
+    let still_there = pool
+        .client()
+        .query_one("SELECT count(*) FROM hazir_canary", &[])
+        .await;
+
+    pool.give_back(&schema, true).await.ok();
+    let _ = std::fs::remove_dir_all(&dir);
+    still_there.expect("the pool's connection lost its search path");
+}
+
+/// The same, for a snapshot that came out of pg_dump rather than out of a
+/// file. This is the path a project whose migrations are code takes, and the
+/// one where the `set_config` is not the test's own doing but pg_dump's.
+#[tokio::test]
+async fn replaying_a_dumped_snapshot_leaves_the_search_path_alone() {
+    let Some((pool, _)) = ready(1).await else {
+        return;
+    };
+
+    pool.client()
+        .batch_execute("CREATE TABLE IF NOT EXISTS hazir_canary (id int)")
+        .await
+        .expect("a table in the default schema");
+
+    // What pg_dump writes: every object qualified, and the search path
+    // emptied so that nothing can be resolved by accident.
+    let fingerprint = format!("{:0<64}", "dumped");
+    let ddl = format!(
+        "SELECT pg_catalog.set_config('search_path', '', false);\n\
+         CREATE TABLE {token}.\"thing\" (\"id\" bigint NOT NULL);\n",
+        token = hazir::PLACEHOLDER
+    );
+    pool.client()
+        .execute(
+            "INSERT INTO hazir.snapshot (fingerprint, ddl, shape, apply)
+             VALUES ($1, $2, '', 'placeholder')
+             ON CONFLICT (fingerprint) DO UPDATE SET ddl = EXCLUDED.ddl",
+            &[&fingerprint, &ddl],
+        )
+        .await
+        .expect("a snapshot standing in for a dump");
+
+    let schema = pool
+        .build_one(&fingerprint, false, false)
+        .await
+        .expect("a schema built from it");
+
+    let still_there = pool
+        .client()
+        .query_one("SELECT count(*) FROM hazir_canary", &[])
+        .await;
+
+    pool.give_back(&schema, true).await.ok();
+    still_there.expect("the pool's connection lost its search path");
+}

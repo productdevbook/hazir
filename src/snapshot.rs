@@ -60,19 +60,24 @@ impl Apply {
 
     /// The text that builds one schema.
     ///
-    /// The search path is put back afterwards because the connection running
-    /// this is the one that goes on to keep the pool's own books, and leaving
-    /// it pointed at somebody's test schema is how those end up written
-    /// somewhere nobody looks.
+    /// Both forms put the search path back, and the second is the one that
+    /// taught us to. A pg_dump carries `set_config('search_path', '')` of its
+    /// own, so replaying one on the connection that keeps the pool's books
+    /// left that connection unable to see an unqualified table again — which
+    /// surfaced a long way off, as somebody else's table having gone missing.
+    /// A library has no business changing a session it was lent.
     pub(crate) fn statements(self, ddl: &str, schema: &str) -> String {
         match self {
-            Apply::SearchPath => {
+            Apply::SearchPath => format!(
+                "SET search_path TO {};\n{ddl}\n;RESET search_path;",
+                quote(schema)
+            ),
+            Apply::Placeholder => {
                 format!(
-                    "SET search_path TO {};\n{ddl}\n;RESET search_path;",
-                    quote(schema)
+                    "{}\n;RESET search_path;",
+                    ddl.replace(PLACEHOLDER, &quote(schema))
                 )
             }
-            Apply::Placeholder => ddl.replace(PLACEHOLDER, &quote(schema)),
         }
     }
 }
@@ -158,29 +163,19 @@ pub async fn capture(pool: &Pool, fingerprint: &str, recipe: &Recipe) -> Result<
     // would go unnoticed, because the shape it is compared against would have
     // lost it too.
     let template = scratch_name("shape", fingerprint);
-    pool.client()
-        .batch_execute(&format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote(&template)
-        ))
-        .await?;
-    pool.client()
-        .batch_execute(&format!("CREATE SCHEMA {}", quote(&template)))
-        .await?;
-    pool.client()
-        .batch_execute(&apply.statements(&ddl, &template))
-        .await?;
-    let shape: String = pool
+    let looked_at = shape_of(pool, &ddl, apply, &template).await;
+    // Whatever happened, the scratch schema goes and the connection's search
+    // path goes back to what it was. A warm-up that failed used to leave one
+    // of each behind every time it was run.
+    let _ = pool
         .client()
-        .query_one("SELECT hazir.shape($1)", &[&template])
-        .await?
-        .get(0);
-    pool.client()
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE",
             quote(&template)
         ))
-        .await?;
+        .await;
+    let _ = pool.client().batch_execute("RESET search_path").await;
+    let shape = looked_at?;
 
     pool.client()
         .execute(
@@ -197,6 +192,28 @@ pub async fn capture(pool: &Pool, fingerprint: &str, recipe: &Recipe) -> Result<
         shape,
         apply,
     })
+}
+
+/// What a snapshot builds, built once somewhere disposable so it can be looked
+/// at.
+async fn shape_of(pool: &Pool, ddl: &str, apply: Apply, template: &str) -> Result<String> {
+    pool.client()
+        .batch_execute(&format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE",
+            quote(template)
+        ))
+        .await?;
+    pool.client()
+        .batch_execute(&format!("CREATE SCHEMA {}", quote(template)))
+        .await?;
+    pool.client()
+        .batch_execute(&apply.statements(ddl, template))
+        .await?;
+    Ok(pool
+        .client()
+        .query_one("SELECT hazir.shape($1)", &[&template])
+        .await?
+        .get(0))
 }
 
 fn read_all(files: &[PathBuf]) -> Result<String> {
@@ -418,7 +435,8 @@ mod tests {
     #[test]
     fn a_dump_has_its_token_swapped() {
         let built = Apply::Placeholder.statements("CREATE TABLE @hazir_schema@.\"a\" ();", "s");
-        assert_eq!(built, "CREATE TABLE \"s\".\"a\" ();");
+        assert!(built.starts_with("CREATE TABLE \"s\".\"a\" ();"), "{built}");
+        assert!(built.trim_end().ends_with("RESET search_path;"), "{built}");
     }
 
     #[test]

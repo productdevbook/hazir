@@ -44,7 +44,7 @@ mod url;
 pub use error::Error;
 pub use holder::Holder;
 pub use lease::Lease;
-pub use pool::Pool;
+pub use pool::{Pool, PLACEHOLDER};
 pub use snapshot::{capture, fingerprint, have_pg_dump, sql_files, Apply, Recipe, Snapshot};
 
 pub type Result<T> = std::result::Result<T, Error>;
