@@ -34,7 +34,22 @@ impl fmt::Display for Error {
             Error::UnknownSnapshot(fp) => write!(f, "no snapshot called {fp} in this database"),
             Error::Exhausted => write!(f, "the pool is empty and a schema could not be built"),
             Error::Unreachable(why) => write!(f, "the pool's database did not answer: {why}"),
-            Error::Postgres(err) => write!(f, "postgres: {err}"),
+            // tokio-postgres prints "db error" and puts everything the
+            // server actually said behind `as_db_error`. Passing that through
+            // is the difference between a message and a shrug.
+            Error::Postgres(err) => match err.as_db_error() {
+                Some(said) => {
+                    write!(f, "postgres: {}", said.message())?;
+                    if let Some(detail) = said.detail() {
+                        write!(f, " ({detail})")?;
+                    }
+                    if let Some(hint) = said.hint() {
+                        write!(f, " — {hint}")?;
+                    }
+                    Ok(())
+                }
+                None => write!(f, "postgres: {err}"),
+            },
             Error::Io(err) => write!(f, "{err}"),
             Error::Migrate(what) => write!(f, "the schema could not be built: {what}"),
             Error::Dump(what) => write!(f, "pg_dump: {what}"),
