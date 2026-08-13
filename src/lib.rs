@@ -51,8 +51,24 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// A schema with the tables already in it, emptied and passed on afterwards.
 pub async fn lease() -> Result<Lease> {
-    let taken = agent::ask(false).await?;
+    let taken = agent::ask(None, false).await?;
     Ok(Lease::new(taken.url, taken.schema, false))
+}
+
+/// The same, from a snapshot named rather than looked up.
+///
+/// For a suite that keeps more than one shape of database. Only one of them
+/// can be what `lease` gives, and a test handed the wrong one fails a long
+/// way from the reason.
+pub async fn lease_from(fingerprint: &str) -> Result<Lease> {
+    let taken = agent::ask(Some(fingerprint.to_owned()), false).await?;
+    Ok(Lease::new(taken.url, taken.schema, false))
+}
+
+/// A schema of this test's own, out of a named snapshot, thrown away after.
+pub async fn lease_fresh_from(fingerprint: &str) -> Result<Lease> {
+    let taken = agent::ask(Some(fingerprint.to_owned()), true).await?;
+    Ok(Lease::new(taken.url, taken.schema, true))
 }
 
 /// A schema of this test's own, thrown away afterwards.
@@ -60,7 +76,7 @@ pub async fn lease() -> Result<Lease> {
 /// For a test that changes the shape of what it is given rather than only its
 /// rows — the tests of a migration, above all.
 pub async fn lease_fresh() -> Result<Lease> {
-    let taken = agent::ask(true).await?;
+    let taken = agent::ask(None, true).await?;
     Ok(Lease::new(taken.url, taken.schema, true))
 }
 

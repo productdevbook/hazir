@@ -27,6 +27,10 @@ use crate::{Error, Result};
 
 pub(crate) enum Request {
     Lease {
+        /// Which snapshot, when the caller knows. A suite with more than one
+        /// shape of database keeps more than one, and only one of them can be
+        /// the one a lease that names none is given.
+        fingerprint: Option<String>,
         burn: bool,
         reply: oneshot::Sender<Result<Taken>>,
     },
@@ -88,12 +92,19 @@ pub(crate) fn agent() -> Result<&'static UnboundedSender<Request>> {
 
 async fn serve(pool: &Pool, request: Request) {
     match request {
-        Request::Lease { burn, reply } => {
-            let taken = pool.claim(burn).await.map(|schema| Taken {
+        Request::Lease {
+            fingerprint,
+            burn,
+            reply,
+        } => {
+            let claimed = match fingerprint {
+                Some(fingerprint) => pool.claim_from(&fingerprint, burn).await,
+                None => pool.claim(burn).await,
+            };
+            let _ = reply.send(claimed.map(|schema| Taken {
                 schema,
                 url: pool.url().to_owned(),
-            });
-            let _ = reply.send(taken);
+            }));
         }
         Request::GiveBack { schema, burn, done } => {
             let _ = pool.give_back(&schema, burn).await;
@@ -114,10 +125,14 @@ fn refuse(request: Request, why: &Error) {
 }
 
 /// Asks for a schema and waits for the answer.
-pub(crate) async fn ask(burn: bool) -> Result<Taken> {
+pub(crate) async fn ask(fingerprint: Option<String>, burn: bool) -> Result<Taken> {
     let (reply, answer) = oneshot::channel();
     agent()?
-        .send(Request::Lease { burn, reply })
+        .send(Request::Lease {
+            fingerprint,
+            burn,
+            reply,
+        })
         .map_err(|_| Error::Exhausted)?;
     answer.await.map_err(|_| Error::Exhausted)?
 }

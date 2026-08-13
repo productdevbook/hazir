@@ -312,3 +312,28 @@ async fn a_fresh_lease_is_thrown_away_afterwards() {
         .get(0);
     assert_eq!(left, 0, "a burn-after-use schema was kept");
 }
+
+/// A suite with two shapes of database asks for one by name, and the agent
+/// has to carry that through rather than handing out whatever is current.
+#[tokio::test]
+async fn a_lease_can_name_the_snapshot_it_wants() {
+    let Some((pool, shared)) = ready(2).await else {
+        return;
+    };
+    let mine = own_snapshot(&pool, "named").await;
+    pool.warm(&mine, 2).await.expect("a pool of its own");
+    assert_ne!(mine, shared);
+
+    let lease = hazir::lease_from(&mine).await.expect("a schema");
+
+    let from: String = pool
+        .client()
+        .query_one(
+            "SELECT fingerprint FROM hazir.pool WHERE schema_name = $1",
+            &[&lease.schema()],
+        )
+        .await
+        .expect("the row")
+        .get(0);
+    assert_eq!(from, mine, "the lease came out of the wrong pool");
+}
