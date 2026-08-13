@@ -164,6 +164,24 @@ purpose. So this process opens exactly one, on a thread of its own, and every
 lease goes through it. A version that opened one per lease measured 96 ms and
 was slower than having no pool at all.
 
+## What a warm pool costs
+
+Every schema kept ready is its tables sitting in Postgres's catalogue for the
+whole run. Most code never notices. Code that reads `information_schema` does:
+those views are defined over the entire database and carry permission checks,
+so they get slower as the catalogue grows, and `constraint_column_usage` is
+slow to begin with.
+
+A suite that packages or restores a database — anything that asks Postgres
+what its own tables look like — should size the pool to how many tests run at
+once and no higher. In the project this was written for, a pool of twice that
+made one such test take twice as long, which was more than the pool saved
+everywhere else.
+
+Running out is not a failure. A lease that finds the pool empty is given a
+schema built from the snapshot, and that schema joins the pool — so it finds
+its own size under load rather than being guessed high.
+
 ## What it does not do
 
 - **One Postgres, many schemas.** If your application cannot live inside one
