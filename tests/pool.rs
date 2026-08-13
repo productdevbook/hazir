@@ -30,6 +30,11 @@ async fn ready(want: usize) -> Option<(Pool, String)> {
     hazir::capture(&pool, &fingerprint, &recipe)
         .await
         .expect("the schema to be built once");
+    // Storing a snapshot no longer makes it the one `hazir::lease` gets, and a
+    // database this suite has not run against before has no other.
+    pool.set_current(&fingerprint)
+        .await
+        .expect("the snapshot to be the one a lease gets");
     pool.warm(&fingerprint, want).await.expect("a warm pool");
 
     Some((pool, fingerprint))
