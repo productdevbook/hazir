@@ -35,6 +35,23 @@ async fn ready(want: usize) -> Option<(Pool, String)> {
     Some((pool, fingerprint))
 }
 
+/// A snapshot nothing else in this file will lease from.
+async fn own_snapshot(pool: &Pool, what: &str) -> String {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/migrations");
+    let recipe = Recipe::Sql(hazir::sql_files(&dir).expect("the fixture migrations"));
+    let fingerprint = format!("{:0<64}", format!("own{what}"));
+    hazir::capture(pool, &fingerprint, &recipe)
+        .await
+        .expect("a snapshot of its own");
+    fingerprint
+}
+
+/// The url a lease would have handed back, for a schema claimed directly.
+fn hazir_url_for(pool: &Pool, schema: &str) -> String {
+    let (base, _) = pool.url().split_once('?').unwrap_or((pool.url(), ""));
+    format!("{base}?options=-csearch_path%3D{schema}")
+}
+
 async fn open(url: &str) -> tokio_postgres::Client {
     let (client, connection) = tokio_postgres::connect(url, NoTls)
         .await
@@ -114,45 +131,49 @@ async fn a_schema_that_comes_back_comes_back_empty() {
 /// The reason recycling exists. Dropping and recreating writes to pg_class and
 /// pg_attribute once per table per test, and a long run spends itself in
 /// autovacuum rather than in the tests.
+///
+/// On a snapshot of its own, because what it is counting is the size of a
+/// pool, and every other test in this file is leasing out of the shared one.
+/// Told that twenty leases grew the pool it cannot tell "nothing was
+/// recycled" from "a sibling was holding them all".
 #[tokio::test]
 async fn a_run_of_leases_does_not_leave_schemas_behind() {
-    let Some((pool, fingerprint)) = ready(2).await else {
+    let Some((pool, _)) = ready(2).await else {
         return;
     };
+    let mine = own_snapshot(&pool, "recycling").await;
+    pool.warm(&mine, 2).await.expect("a pool of its own");
 
-    let before: i64 = pool
-        .client()
-        .query_one(
-            "SELECT count(*) FROM hazir.pool WHERE fingerprint = $1",
-            &[&fingerprint],
-        )
-        .await
-        .expect("a count")
-        .get(0);
-
+    let before = held(&pool, &mine).await;
     for _ in 0..20 {
-        let lease = hazir::lease().await.expect("a schema");
-        let client = open(lease.url()).await;
+        let schema = pool.claim_from(&mine, false).await.expect("a schema");
+        let client = open(&hazir_url_for(&pool, &schema)).await;
         client
             .execute("INSERT INTO site (name) VALUES ($1)", &[&"passing through"])
             .await
             .expect("a row");
+        drop(client);
+        pool.give_back(&schema, false)
+            .await
+            .expect("giving it back");
     }
+    let after = held(&pool, &mine).await;
 
-    let after: i64 = pool
-        .client()
+    assert_eq!(
+        after, before,
+        "twenty leases grew the pool from {before} to {after}; they should have been reused"
+    );
+}
+
+async fn held(pool: &Pool, fingerprint: &str) -> i64 {
+    pool.client()
         .query_one(
             "SELECT count(*) FROM hazir.pool WHERE fingerprint = $1",
             &[&fingerprint],
         )
         .await
         .expect("a count")
-        .get(0);
-
-    assert!(
-        after <= before + 2,
-        "twenty leases grew the pool from {before} to {after}; they should have been reused"
-    );
+        .get(0)
 }
 
 /// A test that alters what it was given must not hand it on looking clean.

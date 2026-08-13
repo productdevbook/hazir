@@ -2,7 +2,7 @@
 name = "hazir"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.85"
 license = "MIT"
 description = "Postgres schemas for tests, leased from a warm pool instead of migrated one per test."
 repository = "https://github.com/productdevbook/hazir"

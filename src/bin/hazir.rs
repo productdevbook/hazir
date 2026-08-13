@@ -173,14 +173,8 @@ async fn warm(
         hazir::capture(pool, &fingerprint, recipe).await?;
     } else {
         println!("the schema is unchanged ({})", &fingerprint[..12]);
-        pool.client()
-            .execute(
-                "INSERT INTO hazir.current (sole, fingerprint) VALUES (true, $1)
-                 ON CONFLICT (sole) DO UPDATE SET fingerprint = EXCLUDED.fingerprint",
-                &[&fingerprint],
-            )
-            .await?;
     }
+    pool.set_current(&fingerprint).await?;
 
     // Before stocking, not after: an earlier run's leftovers are schemas that
     // are already built, and taking them back is free where making their

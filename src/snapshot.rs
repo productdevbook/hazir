@@ -138,6 +138,10 @@ fn collect(at: &Path, into: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 /// Builds the schema once and keeps the result.
+///
+/// Storing a snapshot does not make it the one a test gets. Deciding that is
+/// `set_current`, and it is separate because it is the only part of this that
+/// every other run of the suite can see.
 pub async fn capture(pool: &Pool, fingerprint: &str, recipe: &Recipe) -> Result<Snapshot> {
     let (ddl, apply) = match recipe {
         Recipe::Sql(files) => (read_all(files)?, Apply::SearchPath),
@@ -187,14 +191,6 @@ pub async fn capture(pool: &Pool, fingerprint: &str, recipe: &Recipe) -> Result<
             &[&fingerprint, &ddl, &shape, &apply.name()],
         )
         .await?;
-    pool.client()
-        .execute(
-            "INSERT INTO hazir.current (sole, fingerprint) VALUES (true, $1)
-             ON CONFLICT (sole) DO UPDATE SET fingerprint = EXCLUDED.fingerprint",
-            &[&fingerprint],
-        )
-        .await?;
-
     Ok(Snapshot {
         fingerprint: fingerprint.to_owned(),
         ddl,

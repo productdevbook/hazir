@@ -52,6 +52,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-features
+      # --locked, or this checks whatever cargo resolves today rather than
+      # what the lockfile says this was built against.
+      - run: cargo check --all-features --locked

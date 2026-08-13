@@ -88,6 +88,21 @@ impl Pool {
             .cloned()
     }
 
+    /// Says which snapshot a lease that names none should be given.
+    ///
+    /// Apart from taking one, because taking a snapshot is a local matter and
+    /// this is the only part of it every other run of the suite can see.
+    pub async fn set_current(&self, fingerprint: &str) -> Result<()> {
+        self.client
+            .execute(
+                "INSERT INTO hazir.current (sole, fingerprint) VALUES (true, $1)
+                 ON CONFLICT (sole) DO UPDATE SET fingerprint = EXCLUDED.fingerprint",
+                &[&fingerprint],
+            )
+            .await?;
+        Ok(())
+    }
+
     /// The name of a schema with the tables already in it.
     ///
     /// One round trip in the ordinary case. `SKIP LOCKED` because two
@@ -102,8 +117,16 @@ impl Pool {
     /// says it is.
     pub async fn claim(&self, burn: bool) -> Result<String> {
         let fingerprint = self.current().await?;
+        self.claim_from(&fingerprint, burn).await
+    }
+
+    /// The same, from a snapshot named rather than looked up.
+    ///
+    /// A suite with more than one shape of database keeps more than one
+    /// snapshot, and each has a pool of its own.
+    pub async fn claim_from(&self, fingerprint: &str, burn: bool) -> Result<String> {
         if burn {
-            return self.build_one(&fingerprint, true, true).await;
+            return self.build_one(fingerprint, true, true).await;
         }
 
         let holder = Holder::me().to_string();
@@ -124,7 +147,7 @@ impl Pool {
 
         match claimed {
             Some(row) => Ok(row.get(0)),
-            None => self.build_one(&fingerprint, true, false).await,
+            None => self.build_one(fingerprint, true, false).await,
         }
     }
 
