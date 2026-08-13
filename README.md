@@ -76,6 +76,10 @@ be pointed at one and applied exactly as written.
 output, so it wants the Postgres client tools on the machine that warms —
 once per change to the migrations, and never during a test run.
 
+`HAZIR_PG_DUMP` says which one to run, when the one on PATH is the wrong one.
+pg_dump refuses to read a server newer than itself, and a distribution that
+packages 16 against a server running 18 leaves nothing else to do.
+
 Where the pool lives comes from `HAZIR_URL`, `TEST_DATABASE_URL` or
 `DATABASE_URL`, in that order. There is no default: a url guessed here would
 either fail to connect, which reads as this crate being broken rather than the

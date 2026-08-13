@@ -268,9 +268,22 @@ pub(crate) async fn run(command: &str, scoped_url: &str, schema: &str) -> Result
     Ok(())
 }
 
+/// Which `pg_dump` to run.
+///
+/// `HAZIR_PG_DUMP` because the one on PATH is often the wrong one and often
+/// not replaceable: pg_dump refuses a server newer than itself, and a distro
+/// that packages 16 against a server running 18 leaves nothing to do but say
+/// where the right one is.
+fn pg_dump() -> String {
+    std::env::var("HAZIR_PG_DUMP")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| "pg_dump".to_owned())
+}
+
 /// Whether the machine has the one external tool any of this wants.
 pub async fn have_pg_dump() -> bool {
-    tokio::process::Command::new("pg_dump")
+    tokio::process::Command::new(pg_dump())
         .arg("--version")
         .output()
         .await
@@ -284,7 +297,7 @@ pub async fn have_pg_dump() -> bool {
 /// generated identifier, so a literal replacement of it cannot hit anything
 /// else in the dump.
 async fn dump(url: &str, template: &str) -> Result<String> {
-    let output = tokio::process::Command::new("pg_dump")
+    let output = tokio::process::Command::new(pg_dump())
         .arg("--dbname")
         .arg(url)
         .arg("--schema-only")
