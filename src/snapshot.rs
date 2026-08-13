@@ -324,19 +324,37 @@ async fn dump(url: &str, template: &str) -> Result<String> {
         ));
     }
 
-    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(tidy(&String::from_utf8_lossy(&output.stdout), template))
+}
+
+/// What comes back from pg_dump, made into something a driver can replay.
+///
+/// A pure function because the two things it has to get right are both easy
+/// to get wrong and impossible to notice: it is only ever run against a real
+/// pg_dump, and a dump that fails to replay says "syntax error" pointing at a
+/// character rather than at a reason.
+fn tidy(dumped: &str, template: &str) -> String {
     let quoted = quote(template);
 
-    Ok(text
+    dumped
         .lines()
         // The dump makes the schema; whoever replays this has already made it.
-        .filter(|line| !line.trim_start().starts_with("CREATE SCHEMA"))
+        //
+        // At the start of the line rather than anywhere in it, and the same
+        // for the backslashes below: pg_dump writes its own statements at
+        // column zero, and a dollar-quoted function body is indented. Being
+        // lenient here would quietly delete a line out of somebody's trigger.
+        .filter(|line| !line.starts_with("CREATE SCHEMA"))
+        // `\restrict` and `\unrestrict`, which Postgres 18's pg_dump wraps
+        // every dump in. They are psql's own, not the server's, and a driver
+        // handed one reports a syntax error at a backslash and nothing else.
+        .filter(|line| !line.starts_with('\\'))
         .map(|line| {
             line.replace(&quoted, PLACEHOLDER)
                 .replace(template, PLACEHOLDER)
         })
         .collect::<Vec<_>>()
-        .join("\n"))
+        .join("\n")
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -408,6 +426,50 @@ mod tests {
         for one in [Apply::SearchPath, Apply::Placeholder] {
             assert_eq!(Apply::from_name(one.name()), one);
         }
+    }
+
+    /// The dump a Postgres 18 actually produces, in miniature.
+    #[test]
+    fn what_pg_dump_wraps_a_dump_in_is_taken_back_off() {
+        let dumped = concat!(
+            "--\n",
+            "-- PostgreSQL database dump\n",
+            "--\n",
+            "\n",
+            "\\restrict RZzJ6DyJpEzvTvMo3Hn18oVUtwXfFskKfFDdZOokpFS\n",
+            "\n",
+            "SET statement_timeout = 0;\n",
+            "CREATE SCHEMA \"hazir_template_abc\";\n",
+            "CREATE TABLE \"hazir_template_abc\".\"site\" (\n",
+            "    \"id\" bigint NOT NULL\n",
+            ");\n",
+            "\n",
+            "\\unrestrict RZzJ6DyJpEzvTvMo3Hn18oVUtwXfFskKfFDdZOokpFS\n",
+        );
+
+        let tidied = super::tidy(dumped, "hazir_template_abc");
+
+        assert!(!tidied.contains("restrict"), "{tidied}");
+        assert!(!tidied.contains("CREATE SCHEMA"), "{tidied}");
+        assert!(!tidied.contains("hazir_template_abc"), "{tidied}");
+        assert!(
+            tidied.contains("CREATE TABLE @hazir_schema@.\"site\""),
+            "{tidied}"
+        );
+        assert!(tidied.contains("SET statement_timeout = 0;"), "{tidied}");
+    }
+
+    /// An indented backslash is somebody's function body, not psql's.
+    #[test]
+    fn a_backslash_inside_a_statement_is_left_alone() {
+        let dumped = concat!(
+            "CREATE FUNCTION \"hazir_template_abc\".\"f\"() RETURNS text AS $$\n",
+            "    \\ this line belongs to the body\n",
+            "$$ LANGUAGE sql;\n",
+        );
+        let tidied = super::tidy(dumped, "hazir_template_abc");
+        assert!(tidied.contains("belongs to the body"), "{tidied}");
+        assert!(tidied.contains("$$ LANGUAGE sql;"), "{tidied}");
     }
 
     #[test]
