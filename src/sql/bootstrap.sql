@@ -153,14 +153,19 @@ BEGIN
     -- `TRUNCATE ... RESTART IDENTITY` put every sequence back to one, and the
     -- rows just restored use the numbers it would hand out next. Without this
     -- the first row a test writes collides with a seeded one.
+    -- Only the tables that were actually seeded. Walking every column of
+    -- every table in the schema instead cost more than everything else this
+    -- crate does put together: ninety-seven tables' worth of catalogue
+    -- lookups on every release, to wind on the two sequences that needed it.
     FOR serial IN
         SELECT c.relname AS on_table,
                a.attname AS in_column,
                pg_get_serial_sequence(format('%I.%I', target, c.relname), a.attname) AS which
           FROM pg_class c
-          JOIN pg_namespace n ON n.oid = c.relnamespace
           JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
-         WHERE n.nspname = target AND c.relkind = 'r'
+         WHERE c.relnamespace = to_regnamespace(target)::oid
+           AND c.relkind = 'r'
+           AND c.relname IN (SELECT tablename FROM pg_tables WHERE schemaname = seed)
     LOOP
         CONTINUE WHEN serial.which IS NULL;
         EXECUTE format('SELECT max(%I) FROM %I.%I', serial.in_column, target, serial.on_table)
