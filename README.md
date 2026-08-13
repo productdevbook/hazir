@@ -20,8 +20,9 @@ the end, and nothing in the code explains why.
 - **A test leases a schema rather than building one.** One statement,
   `FOR UPDATE SKIP LOCKED`, about a millisecond.
 - **A schema comes back emptied, not dropped.** `TRUNCATE` every table in one
-  statement. The catalogue never grows, so the last test in a run costs what
-  the first one did.
+  statement, and then whatever the migrations themselves wrote goes back in —
+  default rows, a table saying which migrations have run. The catalogue never
+  grows, so the last test in a run costs what the first one did.
 - **Nothing depends on a test cleaning up.** A lease records the machine, the
   boot and the process holding it; `hazir reclaim` takes back what is held by
   processes that have finished. The tests that break are exactly the ones that
@@ -170,7 +171,10 @@ was slower than having no pool at all.
   this is not for you.
 - **`--migrate` wants `pg_dump`.** Only when warming, never when testing.
 - **Sequences that no table owns are not reset** by the wipe. Tables and their
-  own sequences are.
+  own sequences are, and a sequence behind a seeded row is wound past it.
+- **A snapshot carries the rows the migrations wrote.** That is on purpose —
+  a test given the tables without them gets a database that has never existed
+  — but it means a migration that seeds a million rows makes a large snapshot.
 - **`hazir` writes to a schema called `hazir`** in the database you point it
   at. Point it at a test database.
 

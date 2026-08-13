@@ -32,6 +32,9 @@ pub struct Snapshot {
     pub ddl: String,
     pub shape: String,
     pub apply: Apply,
+    /// The schema holding what the migrations themselves wrote, if they wrote
+    /// anything. Copied back into every schema built or recycled from this.
+    pub seed: Option<String>,
 }
 
 /// What has to happen to a snapshot's text before it will build a schema.
@@ -163,7 +166,8 @@ pub async fn capture(pool: &Pool, fingerprint: &str, recipe: &Recipe) -> Result<
     // would go unnoticed, because the shape it is compared against would have
     // lost it too.
     let template = scratch_name("shape", fingerprint);
-    let looked_at = shape_of(pool, &ddl, apply, &template).await;
+    let seed_schema = format!("hazir_seed_{}", &fingerprint[..16.min(fingerprint.len())]);
+    let looked_at = shape_of(pool, &ddl, apply, &template, &seed_schema).await;
     // Whatever happened, the scratch schema goes and the connection's search
     // path goes back to what it was. A warm-up that failed used to leave one
     // of each behind every time it was run.
@@ -175,15 +179,17 @@ pub async fn capture(pool: &Pool, fingerprint: &str, recipe: &Recipe) -> Result<
         ))
         .await;
     let _ = pool.client().batch_execute("RESET search_path").await;
-    let shape = looked_at?;
+    let (shape, seeded) = looked_at?;
+    let seed = seeded.then(|| seed_schema.clone());
 
     pool.client()
         .execute(
-            "INSERT INTO hazir.snapshot (fingerprint, ddl, shape, apply)
-             VALUES ($1, $2, $3, $4)
+            "INSERT INTO hazir.snapshot (fingerprint, ddl, shape, apply, seed)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (fingerprint) DO UPDATE
-                SET ddl = EXCLUDED.ddl, shape = EXCLUDED.shape, apply = EXCLUDED.apply",
-            &[&fingerprint, &ddl, &shape, &apply.name()],
+                SET ddl = EXCLUDED.ddl, shape = EXCLUDED.shape,
+                    apply = EXCLUDED.apply, seed = EXCLUDED.seed",
+            &[&fingerprint, &ddl, &shape, &apply.name(), &seed],
         )
         .await?;
     Ok(Snapshot {
@@ -191,12 +197,21 @@ pub async fn capture(pool: &Pool, fingerprint: &str, recipe: &Recipe) -> Result<
         ddl,
         shape,
         apply,
+        seed,
     })
 }
 
-/// What a snapshot builds, built once somewhere disposable so it can be looked
-/// at.
-async fn shape_of(pool: &Pool, ddl: &str, apply: Apply, template: &str) -> Result<String> {
+/// What a snapshot builds, built once somewhere disposable so it can be
+/// looked at — and so that whatever the migrations wrote can be kept.
+///
+/// Returns what the schema looks like, and whether anything was seeded.
+async fn shape_of(
+    pool: &Pool,
+    ddl: &str,
+    apply: Apply,
+    template: &str,
+    seed: &str,
+) -> Result<(String, bool)> {
     pool.client()
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE",
@@ -209,11 +224,18 @@ async fn shape_of(pool: &Pool, ddl: &str, apply: Apply, template: &str) -> Resul
     pool.client()
         .batch_execute(&apply.statements(ddl, template))
         .await?;
-    Ok(pool
+    let shape: String = pool
         .client()
         .query_one("SELECT hazir.shape($1)", &[&template])
         .await?
-        .get(0))
+        .get(0);
+    let seeded: bool = pool
+        .client()
+        .query_one("SELECT hazir.take_seed($1, $2)", &[&template, &seed])
+        .await?
+        .get(0);
+
+    Ok((shape, seeded))
 }
 
 fn read_all(files: &[PathBuf]) -> Result<String> {
@@ -317,7 +339,14 @@ async fn dump(url: &str, template: &str) -> Result<String> {
     let output = tokio::process::Command::new(pg_dump())
         .arg("--dbname")
         .arg(url)
-        .arg("--schema-only")
+        // Not --schema-only: a migration that seeds rows is describing what a
+        // database of this shape contains, and a test given the tables
+        // without them gets something that has never existed.
+        //
+        // --inserts rather than pg_dump's usual COPY, because COPY in a dump
+        // is a protocol exchange rather than a statement, and this is replayed
+        // through a driver as ordinary sql.
+        .arg("--inserts")
         .arg("--no-owner")
         .arg("--no-privileges")
         .arg("--no-comments")

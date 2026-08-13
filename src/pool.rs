@@ -14,6 +14,11 @@ pub const PLACEHOLDER: &str = "@hazir_schema@";
 
 const BOOTSTRAP: &str = include_str!("sql/bootstrap.sql");
 
+/// How many schemas one `DROP` takes down. Each is every table in it, and
+/// every table is a lock held to the end of the statement; all of them at once
+/// has run a server out of shared memory.
+const SWEEP_AT_A_TIME: usize = 10;
+
 /// An arbitrary number, and only ever compared with itself.
 const BOOTSTRAP_LOCK: i64 = 6_174_310_982_745_113;
 
@@ -186,6 +191,69 @@ impl Pool {
         Ok(short)
     }
 
+    /// Throws away every snapshot but the ones named, and the schemas built
+    /// from them.
+    ///
+    /// A suite whose fingerprint moves with its own source — which is the
+    /// safe way to fingerprint, because a list of the files that matter is a
+    /// list that goes silently out of date — leaves a snapshot behind on
+    /// every change. A fortnight of those is a fortnight of schemas, which is
+    /// the mess this crate exists to prevent arriving by another door.
+    ///
+    /// Returns how many schemas were dropped.
+    pub async fn forget(&self, keep: &[String]) -> Result<usize> {
+        let mut going: Vec<String> = self
+            .client
+            .query(
+                "SELECT schema_name FROM hazir.pool WHERE fingerprint <> ALL($1)",
+                &[&keep],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        let dropped = going.len();
+
+        going.extend(
+            self.client
+                .query(
+                    "SELECT seed FROM hazir.snapshot
+                      WHERE fingerprint <> ALL($1) AND seed IS NOT NULL",
+                    &[&keep],
+                )
+                .await?
+                .iter()
+                .map(|row| row.get::<_, String>(0)),
+        );
+
+        // A few at a time: each schema is every table in it, and every table
+        // is a lock held to the end of the statement.
+        for some in going.chunks(SWEEP_AT_A_TIME) {
+            let names: Vec<String> = some.iter().map(|name| quote(name)).collect();
+            self.client
+                .batch_execute(&format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    names.join(", ")
+                ))
+                .await?;
+        }
+
+        self.client
+            .execute(
+                "DELETE FROM hazir.pool WHERE fingerprint <> ALL($1)",
+                &[&keep],
+            )
+            .await?;
+        self.client
+            .execute(
+                "DELETE FROM hazir.snapshot WHERE fingerprint <> ALL($1)",
+                &[&keep],
+            )
+            .await?;
+
+        Ok(dropped)
+    }
+
     /// Takes back what the processes that had them are no longer alive to use.
     ///
     /// Returns how many came back.
@@ -242,6 +310,17 @@ impl Pool {
         self.client
             .execute("SELECT hazir.wipe($1)", &[&schema])
             .await?;
+        // Emptying took out what the migrations wrote as well as what the
+        // test did. Only the second of those was the test's to lose.
+        self.client
+            .execute(
+                "SELECT hazir.reseed($1, (SELECT s.seed FROM hazir.pool p
+                                            JOIN hazir.snapshot s
+                                              ON s.fingerprint = p.fingerprint
+                                           WHERE p.schema_name = $1))",
+                &[&schema],
+            )
+            .await?;
         self.client
             .execute(
                 "UPDATE hazir.pool
@@ -282,6 +361,10 @@ impl Pool {
         let ddl: String = row.get(0);
         let apply = Apply::from_name(row.get(1));
 
+        // Nothing is reseeded here: the ddl carries the rows the migrations
+        // wrote, whether it is sql somebody wrote or a dump taken with
+        // --inserts. Putting them in twice is a duplicate key. Restoring is
+        // for the schema that comes back emptied — see `give_back`.
         let schema = name_for(fingerprint);
         self.client
             .batch_execute(&format!("CREATE SCHEMA {}", quote(&schema)))

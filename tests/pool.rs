@@ -428,3 +428,68 @@ async fn replaying_a_dumped_snapshot_leaves_the_search_path_alone() {
     pool.give_back(&schema, true).await.ok();
     still_there.expect("the pool's connection lost its search path");
 }
+
+/// A migration that seeds rows is saying what a database of this shape
+/// contains. Emptying a schema on the way back to the pool took those out
+/// along with the test's own, and the next test got tables that were right
+/// and contents that were not — failing a long way from the reason.
+#[tokio::test]
+async fn what_the_migrations_wrote_survives_being_recycled() {
+    let Some((pool, _)) = ready(1).await else {
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("hazir-seed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("somewhere to put it");
+    std::fs::write(
+        dir.join("001.sql"),
+        "CREATE TABLE thing (id bigserial PRIMARY KEY, name text NOT NULL);\n\
+         INSERT INTO thing (name) VALUES ('what the migration wrote');\n",
+    )
+    .expect("a migration that seeds");
+
+    let recipe = Recipe::Sql(hazir::sql_files(&dir).expect("the file"));
+    let fingerprint = format!("{:0<64}", "seeded");
+    hazir::capture(&pool, &fingerprint, &recipe)
+        .await
+        .expect("a snapshot");
+    pool.warm(&fingerprint, 1).await.expect("a pool of one");
+
+    let first = pool
+        .claim_from(&fingerprint, false)
+        .await
+        .expect("a schema");
+    {
+        let client = open(&hazir_url_for(&pool, &first)).await;
+        assert_eq!(count(&client, "thing").await, 1, "the seed was not there");
+        client
+            .execute("INSERT INTO thing (name) VALUES ($1)", &[&"the test's own"])
+            .await
+            .expect("a row of its own");
+        assert_eq!(count(&client, "thing").await, 2);
+    }
+    pool.give_back(&first, false).await.expect("giving it back");
+
+    let again = pool
+        .claim_from(&fingerprint, false)
+        .await
+        .expect("a schema");
+    assert_eq!(again, first, "a pool of one gave out something else");
+    let client = open(&hazir_url_for(&pool, &again)).await;
+    assert_eq!(
+        count(&client, "thing").await,
+        1,
+        "the seed did not come back, or the test's row did"
+    );
+
+    // And the sequence is past the seeded row, which `RESTART IDENTITY` had
+    // put back to the number the seed already uses.
+    client
+        .execute("INSERT INTO thing (name) VALUES ($1)", &[&"after the seed"])
+        .await
+        .expect("an insert that does not collide with the seed");
+
+    pool.give_back(&again, true).await.ok();
+    let _ = std::fs::remove_dir_all(&dir);
+}

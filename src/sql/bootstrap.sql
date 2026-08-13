@@ -15,6 +15,15 @@ CREATE TABLE IF NOT EXISTS hazir.snapshot (
     made_at     timestamptz NOT NULL DEFAULT now()
 );
 
+-- Where the rows the migrations themselves wrote are kept.
+--
+-- A migration that seeds — default content types, a bookkeeping row saying
+-- which migrations have run — puts rows in the schema it builds, and emptying
+-- a schema on the way back to the pool took them out again. The next test got
+-- tables that were right and contents that were not, and failed saying
+-- something a long way from that.
+ALTER TABLE hazir.snapshot ADD COLUMN IF NOT EXISTS seed text;
+
 -- Which snapshot a test that names none should be given. One row, and the
 -- check is what keeps it one row.
 CREATE TABLE IF NOT EXISTS hazir.current (
@@ -87,5 +96,78 @@ BEGIN
     IF tables IS NOT NULL THEN
         EXECUTE 'TRUNCATE TABLE ' || tables || ' RESTART IDENTITY CASCADE';
     END IF;
+END;
+$$;
+
+-- Keeps a copy of whatever the migrations put in a schema.
+--
+-- Tables with nothing in them are skipped, and a snapshot that seeded nothing
+-- keeps no copy at all, so this costs nothing for the projects it does not
+-- apply to.
+CREATE OR REPLACE FUNCTION hazir.take_seed(source text, seed text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE
+    one     record;
+    rows_in bigint;
+    seeded  boolean := false;
+BEGIN
+    EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', seed);
+    EXECUTE format('CREATE SCHEMA %I', seed);
+
+    FOR one IN SELECT tablename FROM pg_tables WHERE schemaname = source LOOP
+        EXECUTE format('SELECT count(*) FROM %I.%I', source, one.tablename) INTO rows_in;
+        CONTINUE WHEN rows_in = 0;
+        EXECUTE format(
+            'CREATE TABLE %I.%I AS SELECT * FROM %I.%I',
+            seed, one.tablename, source, one.tablename
+        );
+        seeded := true;
+    END LOOP;
+
+    IF NOT seeded THEN
+        EXECUTE format('DROP SCHEMA %I CASCADE', seed);
+    END IF;
+    RETURN seeded;
+END;
+$$;
+
+-- Puts them back, after a wipe or into a schema just built.
+CREATE OR REPLACE FUNCTION hazir.reseed(target text, seed text) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+    one    record;
+    serial record;
+    top    bigint;
+BEGIN
+    IF seed IS NULL OR to_regnamespace(seed) IS NULL THEN
+        RETURN;
+    END IF;
+
+    FOR one IN SELECT tablename FROM pg_tables WHERE schemaname = seed LOOP
+        EXECUTE format(
+            'INSERT INTO %I.%I SELECT * FROM %I.%I',
+            target, one.tablename, seed, one.tablename
+        );
+    END LOOP;
+
+    -- `TRUNCATE ... RESTART IDENTITY` put every sequence back to one, and the
+    -- rows just restored use the numbers it would hand out next. Without this
+    -- the first row a test writes collides with a seeded one.
+    FOR serial IN
+        SELECT c.relname AS on_table,
+               a.attname AS in_column,
+               pg_get_serial_sequence(format('%I.%I', target, c.relname), a.attname) AS which
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+         WHERE n.nspname = target AND c.relkind = 'r'
+    LOOP
+        CONTINUE WHEN serial.which IS NULL;
+        EXECUTE format('SELECT max(%I) FROM %I.%I', serial.in_column, target, serial.on_table)
+           INTO top;
+        IF top IS NOT NULL THEN
+            PERFORM setval(serial.which, top);
+        END IF;
+    END LOOP;
 END;
 $$;
